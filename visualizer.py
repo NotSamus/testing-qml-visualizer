@@ -35,10 +35,11 @@ def write_page(views, out_html="student_qmlp_viz.html"):
     print(f"[+] Student visualizer saved to {out_html}")
 
 
-def build_view(model, samples=None, encoding="angle", n_qubits=None, n_layers=None):
+def build_view(model, samples=None, encoding="angle", n_qubits=None, n_layers=None, note=None):
     """Build the 3D graph data for one hybrid quantum-classical MLP.
 
     n_qubits and n_layers are read from the model's weights when left as None.
+    note: optional warning shown on the page (e.g. that the weights are untrained).
     encoding: "angle" (AngleEmbedding at the start of every layer, one number per qubit) or
         "amplitude" (AmplitudeEmbedding once at the start, 2**n_qubits numbers as the state's amplitudes).
     samples: optional list of example digits to show and animate. Each is a dict with
@@ -102,8 +103,13 @@ def build_view(model, samples=None, encoding="angle", n_qubits=None, n_layers=No
     links = []
 
     layer_spacing = 90  # Distance between stages along the X-axis
+    layer_gap = 45      # Same ring spacing for every depth, so models compare fairly and depth shows as length
     ring_radius = 40    # Radius of the qubit ring so students see the circular entanglement
-    x0 = -(n_layers + 2.2) * layer_spacing / 2  # Center the network on the origin so the camera frames it
+    meas_x = 2 * layer_spacing + (n_layers - 1) * layer_gap
+    fc_x = meas_x + 1.2 * layer_spacing
+    x0 = -fc_x / 2      # Center the network on the origin so the camera frames it
+    meas_x, fc_x = meas_x + x0, fc_x + x0
+    draw_reupload = not amp_mode and n_layers <= 10  # Beyond that the arcs (9 per layer) bury everything else
 
     def ring(q):
         angle = 2 * math.pi * q / n_qubits
@@ -188,9 +194,13 @@ def build_view(model, samples=None, encoding="angle", n_qubits=None, n_layers=No
                 "color": WIRE, "width": 1.5, "particles": 2
             })
 
+    # Wire thickness is relative to the largest value in this model: trained weights can reach ±10 or more
+    crx_max = max(float(np.abs(state_dict[f"qlayer.crx_layer_{l}"].cpu().numpy()).max()) for l in range(n_layers)) or 1.0
+    fc_max = float(np.abs(fc_weights).max()) or 1.0
+
     # --- STAGE 1..N: Quantum Layers (Rot + CRX Ring; Angle also re-encodes at every layer) ---
     for l in range(1, n_layers + 1):
-        x_pos = x0 + l * layer_spacing
+        x_pos = x0 + layer_spacing + (l - 1) * layer_gap
         rot_w = state_dict[f"qlayer.rot_layer_{l-1}"].cpu().numpy()  # (n_qubits, 3)
         crx_w = state_dict[f"qlayer.crx_layer_{l-1}"].cpu().numpy()  # (n_qubits, 1)
 
@@ -234,12 +244,13 @@ def build_view(model, samples=None, encoding="angle", n_qubits=None, n_layers=No
                     "label": f"Qubit {q} carries its quantum state into Layer {l}",
                     "color": WIRE, "width": 1.5, "particles": 2
                 })
-                if not amp_mode:  # Data re-uploading: AngleEmbedding runs again at the start of this layer
+                if draw_reupload:  # Data re-uploading: AngleEmbedding runs again at the start of this layer
                     links.append({
                         "source": f"In_Q{q}", "target": node_id, "stage": "input",
                         "label": f"Data re-uploading: x{q} encoded again as RX(x{q}) in Layer {l}",
                         "color": INPUT, "width": 0.6, "particles": 1,
-                        "curvature": 0.25, "rotation": angle
+                        # Same small bulge for every layer (curvature is a fraction of the wire's length)
+                        "curvature": 30 / (layer_spacing + (l - 1) * layer_gap), "rotation": angle
                     })
 
             # 2. CRX Ring Entanglement: qubit q controls qubit (q+1) % n_qubits
@@ -247,12 +258,11 @@ def build_view(model, samples=None, encoding="angle", n_qubits=None, n_layers=No
                 "source": node_id, "target": f"L{l}_Q{nxt}", "stage": "quantum",
                 "label": f"CRX entanglement q{q} → q{nxt}: θ = {crx_out:+.2f} rad",
                 "color": signed_color(crx_out),
-                "width": max(1.0, abs(crx_out) * 3.0),
+                "width": 0.6 + 2.4 * abs(crx_out) / crx_max,
                 "particles": 4
             })
 
     # --- STAGE N+1: Pauli-Z Measurement ---
-    meas_x = x0 + (n_layers + 1) * layer_spacing
     for q in range(n_qubits):
         strongest = sorted(range(num_classes), key=lambda c: -abs(fc_weights[c, q]))[:3]
         nodes.append({
@@ -266,7 +276,7 @@ def build_view(model, samples=None, encoding="angle", n_qubits=None, n_layers=No
                     + "</table>",
             "group": "measure",
             "fx": meas_x,
-            "fy": (q - (n_qubits - 1) / 2) * 18,  # Unroll ring into a neat vertical spine
+            "fy": ((n_qubits - 1) / 2 - q) * 18,  # Unroll ring into a vertical spine, qubit 0 at the top
             "fz": 0,
             "color": MEASURE,
             "val": 4
@@ -278,7 +288,6 @@ def build_view(model, samples=None, encoding="angle", n_qubits=None, n_layers=No
         })
 
     # --- STAGE N+2: Classical Linear Layer (n_qubits -> classes) ---
-    fc_x = x0 + (n_layers + 2.2) * layer_spacing
     for c in range(num_classes):
         order = sorted(range(n_qubits), key=lambda q: -abs(fc_weights[c, q]))
         nodes.append({
@@ -292,7 +301,7 @@ def build_view(model, samples=None, encoding="angle", n_qubits=None, n_layers=No
                     + "</table>",
             "group": "output",
             "fx": fc_x,
-            "fy": (c - (num_classes - 1) / 2) * 18,
+            "fy": ((num_classes - 1) / 2 - c) * 18,  # Digit 0 at the top
             "fz": 0,
             "color": OUTPUT,
             "val": 6
@@ -304,13 +313,13 @@ def build_view(model, samples=None, encoding="angle", n_qubits=None, n_layers=No
                 "source": f"Meas_Q{q}", "target": f"Out_{c}", "stage": "output", "kind": "fc", "w": w,
                 "label": f"Linear weight ⟨Z<sub>{q}</sub>⟩ → Digit {c}: {w:+.3f}",
                 "color": signed_color(w),
-                "width": max(0.5, abs(w) * 2.5),
+                "width": 0.4 + 2.6 * abs(w) / fc_max,
                 "particles": 1
             })
 
     meta = {"n_qubits": int(n_qubits), "n_layers": int(n_layers), "num_classes": int(num_classes), "encoding": encoding,
             "colors": {"input": INPUT, "quantum": QUANTUM, "measure": MEASURE, "output": OUTPUT, "pos": POS, "neg": NEG},
-            "samples": examples}
+            "samples": examples, "note": note, "reupload_drawn": draw_reupload}
     return {"nodes": nodes, "links": links, "meta": meta}
 
 
@@ -321,44 +330,64 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Hybrid QMLP Visualizer</title>
   <style>
-    :root { --bg: #0d0d0d; --panel: rgba(26, 26, 25, 0.92); --border: rgba(255, 255, 255, 0.12); --hover: #2c2c2a;
-            --text: #f0efec; --muted: #a3a29c; --pos: #3987e5; --neg: #e66767; --wire: #898781; --accent: #3987e5;
-            --prob: #008300; }
-    body { margin: 0; background: var(--bg); font-family: system-ui, -apple-system, sans-serif; overflow: hidden; color: var(--text); }
-    .panel { position: absolute; z-index: 10; box-sizing: border-box; background: var(--panel); border: 1px solid var(--border);
-             border-radius: 10px; padding: 14px 16px; font-size: 13px; line-height: 1.5; overflow-y: auto; }
-    #hud { top: 16px; left: 16px; width: 272px; max-height: calc(100vh - 32px); }
-    #explain { top: 16px; right: 16px; width: 320px; max-height: calc(100vh - 32px); }
+    /* Every size below comes from fixed scales: spacing 4/8/12/16/24, type 12/14/16/18, opacity .05/.1/.4 */
+    :root { --bg: #0d0d0d; --panel: #1a1a19; --raised: #383835; --line: rgba(255, 255, 255, 0.1);
+            --text: #f0efec; --muted: #a3a29c; --pos: #3987e5; --neg: #e66767; --wire: #898781; --prob: #008300; --warn: #fab219; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, sans-serif; overflow: hidden; }
+    /* Floating panels stand apart from the scene by lightness, not outlines */
+    .panel { position: absolute; z-index: 10; box-sizing: border-box; max-height: calc(100vh - 32px); padding: 16px;
+             overflow-y: auto; background: var(--panel); border-radius: 12px; }
+    #hud { top: 16px; left: 16px; width: 256px; }
+    #explain { top: 16px; right: 16px; width: 384px; }  /* ~50 characters per line for the reading panel */
     summary { display: flex; justify-content: space-between; align-items: center; cursor: pointer; list-style: none; }
     summary::-webkit-details-marker { display: none; }
     summary::after { content: '▾'; color: var(--muted); }
     details:not([open]) summary::after { content: '▸'; }
-    #details { margin-top: 10px; }
-    h2 { margin: 0; font-size: 17px; }
-    h3 { margin: 0 0 8px; font-size: 15px; }
-    h4 { margin: 14px 0 6px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }
-    p { margin: 6px 0; }
-    ol { margin: 6px 0; padding-left: 18px; } li { margin: 4px 0; }
+    h2 { margin: 0; font-size: 18px; font-weight: 600; }
+    h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+    h4, #explain summary h2 { margin: 24px 0 8px; font-size: 12px; font-weight: 600; color: var(--muted);
+                              text-transform: uppercase; letter-spacing: .05em; }
+    #explain summary h2 { margin: 0; }  /* The panel title is just a label; the content below carries the heading */
+    #details { margin-top: 8px; }
+    p { margin: 8px 0; }
+    ol { margin: 8px 0; padding-left: 16px; } li { margin: 4px 0; }
+    label { display: block; margin-top: 8px; }
     .muted { color: var(--muted); font-size: 12px; }
-    .stage { display: flex; align-items: center; gap: 8px; width: 100%; margin: 4px 0; padding: 7px 10px; background: transparent;
-             color: var(--text); border: 1px solid var(--border); border-radius: 8px; font: inherit; text-align: left; cursor: pointer; }
-    .stage:hover, .stage[aria-pressed="true"] { background: var(--hover); border-color: rgba(255, 255, 255, 0.3); }
-    .row { display: flex; gap: 8px; } .row .stage { flex: 1; justify-content: center; }
-    button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    .dot { flex: none; display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+    .legend p { margin: 4px 0; }
+    button { font: inherit; color: inherit; cursor: pointer; }
+    button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+    /* Hierarchy: Play is the one primary action; tour stages and choices are secondary; camera links are tertiary */
+    .primary { width: 100%; margin-top: 8px; padding: 8px 12px; border: 0; border-radius: 8px;
+               background: var(--text); color: var(--panel); font-weight: 600; }
+    .primary:hover { background: #ffffff; }
+    .stage { display: flex; align-items: center; gap: 8px; width: 100%; margin-bottom: 4px; padding: 8px 12px; border: 0;
+             border-radius: 8px; background: rgba(255, 255, 255, .05); text-align: left; }
+    .stage:hover { background: rgba(255, 255, 255, .1); }
+    .stage[aria-pressed="true"] { background: rgba(255, 255, 255, .1); box-shadow: inset 4px 0 0 var(--text); font-weight: 600; }
+    .seg { display: flex; gap: 4px; padding: 4px; border-radius: 8px; background: rgba(255, 255, 255, .05); }
+    .seg button { flex: 1; padding: 4px 8px; border: 0; border-radius: 4px; background: none; color: var(--muted); }
+    .seg button:hover:not(:disabled) { color: var(--text); }
+    .seg button[aria-pressed="true"] { background: var(--raised); color: var(--text); font-weight: 600; }
+    .seg button:disabled { opacity: .4; cursor: default; }
+    .links { display: flex; flex-wrap: wrap; column-gap: 16px; margin-top: 4px; }
+    .link { padding: 4px 0; border: 0; background: none; color: var(--muted); white-space: nowrap; }
+    .link:hover { color: var(--text); text-decoration: underline; }
+    .result { font-weight: 600; }
+    .note { padding-left: 8px; border-left: 4px solid var(--warn); }
+    .dot { flex: none; display: inline-block; width: 12px; height: 12px; margin-right: 8px; border-radius: 50%; vertical-align: -2px; }
     .stage .dot { margin-right: 0; }
     table { border-collapse: collapse; width: 100%; }
-    td { padding: 2px 0; } td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+    td { padding: 4px 0; } td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
     /* Numbers stay in text colour; a small swatch or bar carries the sign */
-    td.pos::before, td.neg::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+    td.pos::before, td.neg::before { content: ''; display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 8px; }
     td.pos::before, .bar.pos { background: var(--pos); } td.neg::before, .bar.neg { background: var(--neg); }
     .bar.prob { background: var(--prob); }
     .bars td:nth-child(2) { width: 40%; padding: 0 8px; }
     .bar { display: inline-block; height: 8px; min-width: 2px; border-radius: 2px; vertical-align: middle; }
-    .digit { display: block; width: 112px; height: 112px; margin: 8px 0; image-rendering: pixelated; border-radius: 6px; border: 1px solid var(--border); }
-    .digit.amp { width: 224px; }
-    input[type=range] { width: 100%; accent-color: var(--accent); }
-    .tip { background: rgba(13, 13, 13, 0.92); padding: 6px 10px; border-radius: 6px; border: 1px solid var(--border); font-size: 13px; }
+    .digit { display: block; width: 128px; height: 128px; margin: 8px 0; image-rendering: pixelated; border-radius: 8px; border: 1px solid var(--line); }
+    .digit.amp { width: 256px; }
+    input[type=range] { width: 100%; margin: 4px 0 0; accent-color: var(--text); }
+    .tip { padding: 8px 12px; border-radius: 8px; background: rgba(13, 13, 13, .8); font-size: 14px; }
     @media (max-width: 760px) {
       #hud { right: 16px; width: auto; max-height: 45vh; }
       #explain { top: auto; bottom: 16px; left: 16px; width: auto; max-height: 35vh; }
@@ -376,20 +405,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <details id="hud" class="panel" open>
     <summary><h2>Hybrid QMLP</h2></summary>
     <p class="muted" id="subtitle"></p>
-    <div id="viewPick" hidden><h4>Encoding</h4><div class="row" id="views"></div></div>
-    <p id="result"></p>
+    <p class="note" id="note" hidden></p>
+    <div id="viewPick" hidden><h4>Encoding</h4><div class="seg" id="views"></div></div>
+    <div id="layerPick" hidden><h4>Quantum layers</h4><div class="seg" id="layers"></div></div>
+    <div id="exampleBox" hidden>
+      <h4>Example digits</h4>
+      <p class="result" id="result"></p>
+      <button class="primary" id="play" hidden></button>
+      <div id="speedBox" hidden>
+        <label for="speed">Speed <b id="speedVal">1×</b></label>
+        <input id="speed" type="range" min="0.25" max="3" step="0.25" value="1">
+      </div>
+    </div>
     <h4>Tour the model</h4>
     <div id="stages"></div>
-    <button class="stage" id="play" hidden></button>
-    <div class="row">
-      <button class="stage" id="recenter">⌖ Recenter</button>
-      <button class="stage" id="overview">↺ Show whole model</button>
+    <div class="links">
+      <button class="link" id="recenter">⌖ Recenter</button>
+      <button class="link" id="overview">↺ Show whole model</button>
     </div>
     <h4>Wire colours</h4>
-    <p><span class="dot" style="background:var(--pos)"></span>Positive weight or angle</p>
-    <p><span class="dot" style="background:var(--neg)"></span>Negative weight or angle</p>
-    <p><span class="dot" style="background:var(--wire)"></span>Plain wire: carries a qubit</p>
-    <p class="muted">Thicker wire = larger value.</p>
+    <div class="legend">
+      <p><span class="dot" style="background:var(--pos)"></span>Positive weight or angle</p>
+      <p><span class="dot" style="background:var(--neg)"></span>Negative weight or angle</p>
+      <p><span class="dot" style="background:var(--wire)"></span>Plain wire: carries a qubit</p>
+      <p class="muted">Thicker wire = larger value, compared within this model.</p>
+    </div>
     <h4>Classical weights</h4>
     <label for="thr">Hide weights smaller than <b id="thrVal">0.05</b></label>
     <input id="thr" type="range" min="0" max="1" step="0.01" value="0.05">
@@ -469,8 +509,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           `<p><b>Angle encoding.</b> Each image becomes ${n_qubits} numbers, one per qubit. AngleEmbedding loads number
            x<sub>q</sub> as the rotation RX(x<sub>q</sub>) on qubit q: a larger number (up to π) rotates the qubit further
            away from |0⟩.</p>` +
-           (n_layers > 1 ? `<p>The numbers are loaded again at the start of every layer. This is called <b>data re-uploading</b>
-           and is shown by the thin curved gray wires.</p>` : '')) +
+           (n_layers > 1 ? `<p>The numbers are loaded again at the start of every layer. This is called <b>data re-uploading</b>` +
+           (data.meta.reupload_drawn ? ' and is shown by the thin curved gray wires.</p>'
+             : `. With ${n_layers} layers its wires are left out so the picture stays readable.</p>`) : '')) +
           (SAMPLES.length ? '<p>Follow the example digit on the far left, and click each picture to see each step.</p>' : '') },
         quantum: { title: '2 · Quantum layers', color: C.quantum, text:
           `<p>Each of the ${n_layers} layer${n_layers > 1 ? 's' : ''} has trainable gates:</p>
@@ -544,8 +585,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const tagText = n => {
       const s = S();
       if (!s || !s.z) return '';
-      if (n.group === 'measure') return shown >= 2 ? fmt(s.z[n.q], 2) : '';
-      return shown >= 3 ? `${pct(s.p[n.c])}${n.c === s.pred ? '  ◀ predicted' : ''}` : '';
+      if (n.group === 'measure') return shown >= 2 ? `q${n.q}  ${fmt(s.z[n.q], 2)}` : '';
+      return shown >= 3 ? `${n.c}:  ${pct(s.p[n.c])}${n.c === s.pred ? '  ◀ predicted' : ''}` : '';
     };
     // A small text label beside a node; redrawn whenever the example digit or Play step changes
     function makeTag(n) {
@@ -556,7 +597,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const sprite = new Sprite(new SpriteMaterial({ map, depthTest: false }));
       sprite.scale.set(50, 10, 1);  // Same 5:1 shape as the canvas; readable from the whole-model view
       sprite.center.set(0, 0.5);  // Anchor the left edge so the label sits to the right of the ball
-      sprite.renderOrder = 2;
+      sprite.renderOrder = 20;    // The library draws wires at 10; labels must come after them to stay readable
       n.__tag = { canvas, map, sprite };
       drawTag(n);
       return sprite;
@@ -585,7 +626,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           const mat = new SpriteMaterial({ map: textures[n.image][cur], depthTest: false });
           const sprite = new Sprite(mat);
           sprite.scale.set(n.size * (n.aspect || 1), n.size, 1);
-          sprite.renderOrder = 1;  // Draw the picture on top of its own wires
+          sprite.renderOrder = 15;  // Draw the picture on top of its own wires (the library draws wires at 10)
           n.__mat = mat;
           return sprite;
         }
@@ -632,7 +673,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     // --- Details panel ---
     function showIntro() {
       $('details').innerHTML = `<h3>How to explore</h3><ol>
-        ${VIEWS.length > 1 ? '<li>Switch between <b>Angle</b> and <b>Amplitude</b> encoding at the top left.</li>' : ''}
+        ${ENCODINGS.length > 1 ? '<li>Switch between <b>Angle</b> and <b>Amplitude</b> encoding at the top left.</li>' : ''}
+        ${LAYERS.length > 1 ? `<li>Pick how many <b>quantum layers</b> the model has (${LAYERS.join(', ')}).</li>` : ''}
         ${SAMPLES.length > 1 ? `<li>Press <b>Play</b> to watch ${SAMPLES.length} example digits go through the model.</li>` : ''}
         <li>Click a numbered stage in the tour to fly to it and read what it does.</li>
         <li>Click any ball or wire to see its trained values here.</li>
@@ -665,11 +707,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       redraw();
       showStage(s);
     }
+    // The strip of screen between the side panels (the whole width on phones, where the panels stack)
+    function freeBand() {
+      const h = $('hud').getBoundingClientRect(), e = $('explain').getBoundingClientRect();
+      return e.left > h.right ? [h.right, e.left] : [0, innerWidth];
+    }
+    const viewAngle = () => 2 * Math.tan(Graph.camera().fov * Math.PI / 360);
+    // How far to slide the camera sideways so the scene centers in the free strip, at camera distance d
+    const sideShift = d => ((freeBand()[0] + freeBand()[1]) / 2 - innerWidth / 2) * d * viewAngle() / innerHeight;
     function recenter(ms = 1000) {
-      // Back off until the model fills ~45% of the width (and fits vertically), leaving room for the panels
-      const view = 2 * Math.tan(Graph.camera().fov * Math.PI / 360);
-      const d = Math.max(span / (0.45 * view * innerWidth / innerHeight), 200 / (0.6 * view));
-      Graph.cameraPosition({ x: mid - 0.25 * d, y: 0.25 * d, z: d }, { x: mid, y: 0, z: 0 }, ms);
+      // Back off until the model fills ~85% of the free strip (and fits vertically)
+      const [l, r] = freeBand(), view = viewAngle();
+      const d = Math.max(span * innerHeight / (0.85 * (r - l) * view), 200 / (0.6 * view));
+      const x = mid - sideShift(d);
+      Graph.cameraPosition({ x: x - 0.25 * d, y: 0.25 * d, z: d }, { x, y: 0, z: 0 }, ms);
     }
     function overview(ms = 1000) {  // "Show whole model": stop Play and reset to the first example
       stop();
@@ -684,12 +735,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const stageXs = [...data.nodes.filter(n => n.group === s).map(n => n.fx),
                        ...data.links.filter(l => l.stage === s).flatMap(l => [l.source.fx, l.target.fx])];
       const lo = Math.min(...stageXs), hi = Math.max(...stageXs);
-      const sx = (lo + hi) / 2, d = 260 + hi - lo;
+      const d = 260 + hi - lo, sx = (lo + hi) / 2 - sideShift(d);
       Graph.cameraPosition({ x: sx - 0.45 * d, y: 0.3 * d, z: d }, { x: sx, y: 0, z: 0 }, 1000);
     }
 
     // --- Play: each example digit lights up the stages in order, then the next digit starts ---
-    const STEP_MS = [1200, 1200, 1500, 2200];
+    const STEP_MS = [1200, 1200, 1500, 2200];  // Time on each stage at 1× speed
+    let speed = 1;
+    $('speed').oninput = e => {
+      speed = +e.target.value;
+      $('speedVal').textContent = `${speed}×`;
+      Graph.linkDirectionalParticleSpeed(0.006 * speed);  // The flowing dots keep pace with Play
+    };
     const playLabel = () => `▶ Play ${SAMPLES.length} example digits`;
     let timer = null;
     function playStep(k) {
@@ -701,7 +758,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         if (k < STEPS.length - 1) return playStep(k + 1);
         cur = (cur + 1) % SAMPLES.length;
         playStep(0);
-      }, STEP_MS[k]);
+      }, STEP_MS[k] / speed);
     }
     function stop() {
       clearTimeout(timer);
@@ -752,16 +809,36 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       countShown();
       $('subtitle').textContent = `${n_qubits} qubits · ${n_layers} quantum layer${n_layers > 1 ? 's' : ''} · ` +
         `${AMP ? 'amplitude' : 'angle'} encoding · ${num_classes} classes`;
-      $('play').hidden = SAMPLES.length < 2;
-      document.querySelectorAll('[data-view]').forEach(b => b.setAttribute('aria-pressed', +b.dataset.view === i));
+      $('exampleBox').hidden = SAMPLES.length === 0;
+      $('play').hidden = $('speedBox').hidden = SAMPLES.length < 2;
+      $('note').textContent = data.meta.note ? `⚠ ${data.meta.note}` : '';
+      $('note').hidden = !data.meta.note;
+      view = i;
+      document.querySelectorAll('[data-enc]').forEach(b => b.setAttribute('aria-pressed', b.dataset.enc === encOf(VIEWS[i])));
+      document.querySelectorAll('[data-layers]').forEach(b => {
+        b.setAttribute('aria-pressed', +b.dataset.layers === n_layers);
+        b.disabled = !VIEWS.some(v => encOf(v) === encOf(VIEWS[i]) && layersOf(v) === +b.dataset.layers);
+      });
       Graph.graphData(data);
       overview(ms);
     }
 
-    $('views').innerHTML = VIEWS.map((v, i) =>
-      `<button class="stage" data-view="${i}" aria-pressed="false">${v.meta.encoding === 'amplitude' ? 'Amplitude' : 'Angle'}</button>`).join('');
-    $('viewPick').hidden = VIEWS.length < 2;
-    $('views').onclick = e => { const b = e.target.closest('[data-view]'); if (b) loadView(+b.dataset.view); };
+    // The page holds one precompiled view per trained model; pick by encoding and layer count
+    const encOf = v => v.meta.encoding, layersOf = v => v.meta.n_layers;
+    const ENCODINGS = [...new Set(VIEWS.map(encOf))];
+    const LAYERS = [...new Set(VIEWS.map(layersOf))].sort((a, b) => a - b);
+    let view = 0;
+    function pick(enc, layers) {  // That model, or the one with the closest layer count for this encoding
+      const same = VIEWS.map((v, i) => i).filter(i => encOf(VIEWS[i]) === enc);
+      return same.reduce((best, i) => Math.abs(layersOf(VIEWS[i]) - layers) < Math.abs(layersOf(VIEWS[best]) - layers) ? i : best);
+    }
+    $('views').innerHTML = ENCODINGS.map(e =>
+      `<button data-enc="${e}" aria-pressed="false">${e === 'amplitude' ? 'Amplitude' : 'Angle'}</button>`).join('');
+    $('layers').innerHTML = LAYERS.map(l => `<button data-layers="${l}" aria-pressed="false">${l}</button>`).join('');
+    $('viewPick').hidden = ENCODINGS.length < 2;
+    $('layerPick').hidden = LAYERS.length < 2;
+    $('views').onclick = e => { const b = e.target.closest('[data-enc]'); if (b) loadView(pick(b.dataset.enc, n_layers)); };
+    $('layers').onclick = e => { const b = e.target.closest('[data-layers]'); if (b) loadView(pick(encOf(VIEWS[view]), +b.dataset.layers)); };
     $('overview').onclick = () => overview();
     $('recenter').onclick = () => recenter();
     $('play').onclick = play;
@@ -776,18 +853,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 if __name__ == "__main__":
     import argparse
+    import functools
+    import glob
     import os
+    import re
     import torch
     import torch.nn as nn
     import pennylane as qml
     from pennylane.qnn import TorchLayer
 
-    parser = argparse.ArgumentParser(description="Export the student QMLP visualizer (angle and amplitude models on one page).")
-    parser.add_argument("-l", "--layers", type=int, default=2, help="Number of quantum layers in the models (default: 2)")
+    parser = argparse.ArgumentParser(
+        description="Export the student QMLP visualizer: every trained model in this folder, precompiled into one page.")
+    parser.add_argument("-l", "--layers", type=int, nargs="+",
+                        help="Only these layer counts, e.g. -l 2 10 (default: every qmlp-mnist-run1-layer*.pt found here)")
     args = parser.parse_args()
 
     n_qubits = 9
-    n_layers = args.layers
     num_classes = 10
     mnist_dir = "mnist"  # Folder with the MNIST idx files, relative to where you run this
 
@@ -800,8 +881,11 @@ if __name__ == "__main__":
             shapes[f"crx_layer_{n}"] = (n_qubits, 1)
         return shapes
 
-    def make_model(encoding):
-        """Same circuit and classical layer as the training script for this encoding."""
+    def pt_name(encoding, n_layers):
+        return f"qmlp-mnist-run1-layer{n_layers}-{encoding}.pt"
+
+    def make_model(encoding, n_layers):
+        """Same circuit and classical layer as the training script for this encoding; loads its .pt file if present."""
         @qml.qnode(dev, interface="torch")
         def qnode(inputs, **weights_kwargs):
             if encoding == "Amplitude":  # Loaded once, before the first layer
@@ -822,16 +906,20 @@ if __name__ == "__main__":
                 self.fc = nn.Linear(n_qubits, num_classes)
 
         model = drebin()
-        # Optional: If you have a saved .pt file in this folder, load it; otherwise it uses random weights to test!
-        pt_file = f"qmlp-mnist-run1-layer{n_layers}-{encoding}.pt"
+        pt_file = pt_name(encoding, n_layers)
         if os.path.exists(pt_file):
             print(f"[*] Loading trained weights from {pt_file}...")
             model.load_state_dict(torch.load(pt_file, map_location="cpu"))
-        else:
-            print(f"[*] No {pt_file} found—using randomly initialized weights for preview...")
-        return model
+            return model, None
+        print(f"[*] No {pt_file} found—using randomly initialized weights for preview...")
+        return model, f"Untrained: {pt_file} was not found, so these are random weights and the predictions mean nothing."
 
-    # MNIST, loaded once for both models
+    # Which models to precompile: every trained file found here, or the --layers counts (untrained if missing)
+    found = sorted({int(re.search(r"layer(\d+)-", f).group(1)) for f in glob.glob("qmlp-mnist-run1-layer*-A*.pt")})
+    models = [(enc, n) for n in (args.layers or found or [2]) for enc in ("Angle", "Amplitude")
+              if args.layers or not found or os.path.exists(pt_name(enc, n))]
+
+    # MNIST, loaded once for every model
     mnist = None
     try:
         import idx2numpy
@@ -846,9 +934,10 @@ if __name__ == "__main__":
     except Exception as e:  # The example digits are optional; the visualizer still works without them
         print(f"[*] No example digits ({e})")
 
-    def example_digits(model, encoding):
-        """Preprocess the example digits exactly like that encoding's training script (scaler and PCA fitted on
-        the full training set), then run them through the quantum layer:
+    @functools.lru_cache(maxsize=None)  # Same preprocessing for every layer count, so do it once per encoding
+    def encoded_digits(encoding):
+        """The example digits preprocessed exactly like that encoding's training script (scaler and PCA fitted on
+        the full training set):
           Angle:     28x28 → resize to 3x3 → MinMaxScaler → PCA(n_qubits)
           Amplitude: 28x28 → 784 pixels → MinMaxScaler → PCA(2**n_qubits)"""
         from sklearn.preprocessing import MinMaxScaler
@@ -875,21 +964,24 @@ if __name__ == "__main__":
             n_components = 2 ** n_qubits
         scaler = MinMaxScaler().fit(X_train)
         pca = PCA(n_components=n_components).fit(scaler.transform(X_train))
-        features = pca.transform(scaler.transform(X_pick))
-        with torch.no_grad():  # Run the digits through the quantum layer to get their ⟨Z⟩ values
+        return small, pca.transform(scaler.transform(X_pick))
+
+    def example_digits(model, encoding):
+        small, features = encoded_digits(encoding)
+        with torch.no_grad():  # Run the digits through this model's quantum layer to get their ⟨Z⟩ values
             expvals = model.qlayer(torch.tensor(features, dtype=torch.float32)).numpy()
         return [{"image": mnist["test"][i], "downscaled": s, "features": f, "label": int(mnist["labels"][i]), "expvals": z}
-                for i, s, f, z in zip(picks, small, features, expvals)]
+                for i, s, f, z in zip(mnist["picks"], small, features, expvals)]
 
     views = []
-    for encoding in ("Angle", "Amplitude"):
-        model = make_model(encoding)
+    for encoding, n_layers in models:
+        model, note = make_model(encoding, n_layers)
         samples = []
         if mnist is not None:
             try:
                 samples = example_digits(model, encoding)
             except Exception as e:
                 print(f"[*] {encoding}: skipping the example digits ({e})")
-        views.append(build_view(model, samples, encoding))  # Qubit and layer counts are read from the weights
+        views.append(build_view(model, samples, encoding, note=note))  # Qubit and layer counts are read from the weights
 
     write_page(views, "student_qmlp_viz.html")

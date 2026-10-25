@@ -29,15 +29,15 @@ The exported page loads Three.js and `3d-force-graph` from CDNs, so viewing it r
 python visualizer.py
 ```
 
-Options:
+This precompiles every trained checkpoint named `qmlp-mnist-run1-layer<N>-<Encoding>.pt` in the folder (for example `qmlp-mnist-run1-layer2-Angle.pt`) into one `student_qmlp_viz.html`. The page has buttons to switch encoding (Angle / Amplitude) and layer count.
+
+To include only some layer counts:
 
 ```bash
-python visualizer.py --layers 2
+python visualizer.py --layers 2 10
 ```
 
-This writes `student_qmlp_viz.html`, using the two example encodings on one page with a button to switch between them.
-
-If a checkpoint named `qmlp-mnist-run1-layer<N>-<Encoding>.pt` is present (for example `qmlp-mnist-run1-layer2-Angle.pt`), its weights are loaded; otherwise the script uses randomly initialized weights as a preview.
+With `--layers`, a missing checkpoint is built with random weights and the page shows a warning that its predictions mean nothing. With no checkpoints at all, the script builds 2-layer models with random weights as a preview.
 
 ## Notes
 
