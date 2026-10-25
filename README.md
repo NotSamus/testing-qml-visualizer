@@ -17,9 +17,13 @@ The generated page supports two data encodings side by side:
 
 ## Requirements
 
-- Python 3.9+
-- `numpy`, `torch`, `pennylane`
-- Optional, for example digits and image resizing: `idx2numpy`, `scikit-learn`, `Pillow`, `torchvision`
+Python 3.11+ (PennyLane 0.45 needs it). Install the tested versions with:
+
+```bash
+pip install -r requirements.txt
+```
+
+`numpy`, `torch` and `pennylane` build the models. `idx2numpy`, `scikit-learn`, `Pillow` and `torchvision` are for the example digits; without them the page still builds, just without digits.
 
 The exported page loads Three.js and `3d-force-graph` from CDNs, so viewing it requires an internet connection.
 

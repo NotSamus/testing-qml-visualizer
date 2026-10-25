@@ -1,0 +1,12 @@
+# Python 3.11+ (PennyLane 0.45 needs it). Versions are the ones visualizer.py was tested with.
+
+# Build the models and export the page
+numpy==2.2.6
+torch==2.9.0
+pennylane==0.45.1
+
+# Example digits: load MNIST and preprocess it the same way as the training scripts
+idx2numpy==1.2.3
+scikit-learn==1.7.2   # 1.5+ fits PCA deterministically, so the refit matches training
+pillow==12.0.0
+torchvision==0.24.0   # Must match the torch version above
